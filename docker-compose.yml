@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  astock-api:
+    build: .
+    container_name: astock-minute-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # API访问密钥（生产环境务必设置）
+      - API_KEY=${API_KEY:-your-secret-api-key}
+      # 是否使用代理（生产云服务器通常不需要，设为0）
+      - USE_PROXY=${USE_PROXY:-0}
+      # 服务端口
+      - PORT=8000
+    volumes:
+      # 持久化缓存数据
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
