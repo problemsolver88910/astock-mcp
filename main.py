@@ -20,13 +20,16 @@ A股1分钟行情API服务 - FastAPI主程序
 
 import os
 import sys
+import json
+import re
 import logging
 import datetime
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Header, Query, Depends, status
+from fastapi import FastAPI, HTTPException, Header, Query, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import pandas as pd
@@ -885,6 +888,440 @@ async def cache_status(
     stats = get_cache_stats()
     entries = get_cache_status(symbol)
     return CacheStatusResponse(stats=stats, entries=entries)
+
+
+# ============================================================
+# MCP Streamable HTTP 端点 (JSON-RPC 2.0)
+# ============================================================
+
+MCP_SUPPORTED_PROTOCOLS = {"2025-06-18", "2026-07-28"}
+MCP_DEFAULT_PROTOCOL = "2025-06-18"
+
+MCP_TOOLS = [
+    {
+        "name": "search_stock",
+        "description": "按股票名称或代码查询，解析为标准股票代码（带市场前缀如sh600749）。支持股票名称、纯数字代码、带前缀代码、指数、ETF。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "股票名称或代码，如：平安银行、600749、sh600749、上证指数、沪深300ETF",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_minute_quotes",
+        "description": "获取A股1分钟K线行情数据（OHLCV+成交额+昨收+涨跌幅）。支持一只或多只证券、单日或多日、指定日内时间范围。数据来源新浪财经，自动缓存。单次最多5只股票、10个交易日。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbols": {
+                    "type": "string",
+                    "description": "逗号分隔的股票名称或代码，如：平安银行,西藏旅游,sh600749",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "起始日期 YYYY-MM-DD，如：2026-09-02",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "结束日期 YYYY-MM-DD，如：2026-09-04",
+                },
+                "start_time": {
+                    "type": "string",
+                    "description": "可选，日内起始时间 HH:MM，如：09:30",
+                },
+                "end_time": {
+                    "type": "string",
+                    "description": "可选，日内结束时间 HH:MM，如：11:30",
+                },
+            },
+            "required": ["symbols", "start_date", "end_date"],
+        },
+    },
+    {
+        "name": "get_daily_summary",
+        "description": "获取A股每日概要数据（开盘/收盘/最高/最低/成交量/成交额/昨收/涨跌幅/振幅/K线数量）。支持多股票多日。单次最多5只股票、10个交易日。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbols": {
+                    "type": "string",
+                    "description": "逗号分隔的股票名称或代码",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "起始日期 YYYY-MM-DD",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "结束日期 YYYY-MM-DD",
+                },
+            },
+            "required": ["symbols", "start_date", "end_date"],
+        },
+    },
+]
+
+
+def _mcp_unauthorized(message: str = "Unauthorized") -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={
+            "jsonrpc": "2.0",
+            "error": {"code": -32001, "message": message},
+        },
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _mcp_check_auth(authorization: Optional[str], x_api_key: Optional[str]) -> bool:
+    """MCP端点鉴权：与 /api/* 保持一致。API_KEY未设置时不鉴权。"""
+    if not API_KEY:
+        return True
+    provided = x_api_key
+    if provided is None and authorization:
+        if authorization.startswith("Bearer "):
+            provided = authorization[7:].strip()
+    return provided is not None and provided == API_KEY
+
+
+def _mcp_result(payload: Any, rpc_id: Any) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": rpc_id, "result": payload}
+
+
+def _mcp_error(code: int, message: str, rpc_id: Any = None) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
+
+
+def _tool_search_stock(args: Dict[str, Any]) -> str:
+    query = (args.get("query") or "").strip()
+    if not query:
+        raise ValueError("query 不能为空")
+
+    result = resolve_stock(query)
+    if result:
+        return json.dumps(
+            {"query": query, "result": result, "message": None},
+            ensure_ascii=False,
+        )
+
+    # 内置映射未命中，纯6位数字代码尝试通过新浪API动态查询
+    if re.match(r'^\d{6}$', query):
+        from stock_resolver import _infer_market
+        market = _infer_market(query)
+        symbol = f"{market}{query}"
+        name = fetch_stock_name_from_sina(symbol)
+        if name:
+            return json.dumps(
+                {
+                    "query": query,
+                    "result": {"symbol": symbol, "name": name, "type": "stock"},
+                    "message": "通过新浪API动态查询到股票名称",
+                },
+                ensure_ascii=False,
+            )
+
+    return json.dumps(
+        {
+            "query": query,
+            "result": None,
+            "message": f"未找到匹配的股票: '{query}'",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _tool_get_minute_quotes(args: Dict[str, Any]) -> str:
+    symbols_raw = (args.get("symbols") or "").strip()
+    start_date_str = (args.get("start_date") or "").strip()
+    end_date_str = (args.get("end_date") or "").strip()
+    start_time_str = (args.get("start_time") or "").strip() or None
+    end_time_str = (args.get("end_time") or "").strip() or None
+
+    if not symbols_raw:
+        raise ValueError("symbols 不能为空")
+    if not start_date_str or not end_date_str:
+        raise ValueError("start_date 和 end_date 为必填")
+
+    s_date = parse_date(start_date_str)
+    e_date = parse_date(end_date_str)
+    if s_date > e_date:
+        raise ValueError("起始日期不能大于结束日期")
+
+    s_time = parse_time(start_time_str) if start_time_str else None
+    e_time = parse_time(end_time_str) if end_time_str else None
+
+    symbol_list = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+    if not symbol_list:
+        raise ValueError("symbols 不能为空")
+
+    validate_request_limits(symbol_list, s_date, e_date)
+
+    # 解析股票
+    resolved = []
+    seen = set()
+    for q in symbol_list:
+        r = resolve_stock(q)
+        if r is None:
+            raise ValueError(f"无法解析股票: '{q}'")
+        if r["symbol"] not in seen:
+            seen.add(r["symbol"])
+            resolved.append(r)
+
+    stocks_out = []
+    total_bars = 0
+    for stock in resolved:
+        try:
+            stock_data = get_stock_minute_data_with_cache(
+                symbol=stock["symbol"],
+                name=stock["name"],
+                start_date=s_date,
+                end_date=e_date,
+            )
+            # 日内时间筛选
+            if s_time or e_time:
+                for daily in stock_data.dates:
+                    filtered = []
+                    for bar in daily.bars:
+                        if s_time and bar.time < s_time:
+                            continue
+                        if e_time and bar.time > e_time:
+                            continue
+                        filtered.append(bar)
+                    daily.bars = filtered
+                    daily.bar_count = len(filtered)
+            for daily in stock_data.dates:
+                total_bars += daily.bar_count
+            stocks_out.append(stock_data.model_dump())
+        except Exception as e:
+            logger.error(f"MCP get_minute_quotes 失败 {stock.get('symbol')}: {e}", exc_info=True)
+            raise ValueError(f"获取 {stock.get('symbol')} 数据失败: {e}")
+
+    return json.dumps(
+        {
+            "stocks": stocks_out,
+            "request_params": {
+                "symbols": symbols_raw,
+                "start_date": start_date_str,
+                "end_date": end_date_str,
+                "start_time": start_time_str,
+                "end_time": end_time_str,
+            },
+            "total_bars": total_bars,
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _tool_get_daily_summary(args: Dict[str, Any]) -> str:
+    symbols_raw = (args.get("symbols") or "").strip()
+    start_date_str = (args.get("start_date") or "").strip()
+    end_date_str = (args.get("end_date") or "").strip()
+
+    if not symbols_raw:
+        raise ValueError("symbols 不能为空")
+    if not start_date_str or not end_date_str:
+        raise ValueError("start_date 和 end_date 为必填")
+
+    s_date = parse_date(start_date_str)
+    e_date = parse_date(end_date_str)
+    if s_date > e_date:
+        raise ValueError("起始日期不能大于结束日期")
+
+    symbol_list = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+    if not symbol_list:
+        raise ValueError("symbols 不能为空")
+
+    validate_request_limits(symbol_list, s_date, e_date)
+
+    resolved = []
+    seen = set()
+    for q in symbol_list:
+        r = resolve_stock(q)
+        if r is None:
+            raise ValueError(f"无法解析股票: '{q}'")
+        if r["symbol"] not in seen:
+            seen.add(r["symbol"])
+            resolved.append(r)
+
+    trading_days = get_trading_days(s_date, e_date)
+    stocks_out = []
+    for stock in resolved:
+        symbol = stock["symbol"]
+        name = stock["name"]
+        summaries = []
+        for trade_date in trading_days:
+            date_str = trade_date.strftime("%Y-%m-%d")
+            from_cache = False
+            df_day = None
+            if is_cache_complete(symbol, date_str):
+                cached_df = load_from_cache(symbol, date_str, date_str)
+                if cached_df is not None and not cached_df.empty:
+                    df_day = cached_df
+                    from_cache = True
+            if df_day is None:
+                df_day = fetch_minute_data_by_date(symbol, trade_date)
+                if df_day is not None and not df_day.empty:
+                    save_to_cache(symbol, date_str, df_day)
+            summaries.append(calculate_daily_summary(df_day, date_str, from_cache).model_dump())
+        stocks_out.append(
+            {"symbol": symbol, "name": name, "summaries": summaries}
+        )
+
+    return json.dumps(
+        {
+            "stocks": stocks_out,
+            "request_params": {
+                "symbols": symbols_raw,
+                "start_date": start_date_str,
+                "end_date": end_date_str,
+            },
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+MCP_TOOL_DISPATCH = {
+    "search_stock": _tool_search_stock,
+    "get_minute_quotes": _tool_get_minute_quotes,
+    "get_daily_summary": _tool_get_daily_summary,
+}
+
+
+@app.post(
+    "/mcp",
+    summary="MCP Streamable HTTP 端点",
+    description=(
+        "Model Context Protocol (MCP) Streamable HTTP transport 端点。"
+        "接受 JSON-RPC 2.0 请求，支持 initialize / tools/list / tools/call。"
+        "供 ChatGPT Pro Developer Mode 作为远程 MCP 连接器接入。"
+    ),
+    tags=["MCP"],
+)
+async def mcp_endpoint(
+    request: Request,
+    authorization: Optional[str] = Header(None, alias="Authorization", include_in_schema=False),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key", include_in_schema=False),
+):
+    # 鉴权
+    if not _mcp_check_auth(authorization, x_api_key):
+        return _mcp_unauthorized()
+
+    # 解析请求体
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content=_mcp_error(-32700, "Parse error"),
+        )
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400,
+            content=_mcp_error(-32600, "Invalid Request: body must be a JSON object"),
+        )
+
+    rpc_id = body.get("id")
+    method = body.get("method")
+    params = body.get("params") or {}
+
+    # 通知（无 id）→ 202 Accepted 无 body
+    if method == "notifications/initialized":
+        return Response(status_code=202)
+    if method and method.startswith("notifications/"):
+        return Response(status_code=202)
+
+    if not method:
+        resp = _mcp_error(-32600, "Missing method", rpc_id)
+        return JSONResponse(status_code=400, content=resp)
+
+    try:
+        if method == "initialize":
+            client_proto = (params.get("protocolVersion") or "").strip()
+            negotiated = client_proto if client_proto in MCP_SUPPORTED_PROTOCOLS else MCP_DEFAULT_PROTOCOL
+            result = {
+                "protocolVersion": negotiated,
+                "capabilities": {"tools": {}},
+                "serverInfo": {
+                    "name": "astock-minute-quotes",
+                    "version": "2.0.0",
+                },
+            }
+            return JSONResponse(content=_mcp_result(result, rpc_id))
+
+        if method == "tools/list":
+            return JSONResponse(content=_mcp_result({"tools": MCP_TOOLS}, rpc_id))
+
+        if method == "tools/call":
+            tool_name = params.get("name") if isinstance(params, dict) else None
+            arguments = params.get("arguments") if isinstance(params, dict) else {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            handler = MCP_TOOL_DISPATCH.get(tool_name)
+            if handler is None:
+                resp = _mcp_error(-32601, f"Method not found: unknown tool '{tool_name}'", rpc_id)
+                return JSONResponse(status_code=404, content=resp)
+            try:
+                text_out = handler(arguments)
+            except ValueError as ve:
+                return JSONResponse(
+                    content={
+                        "jsonrpc": "2.0",
+                        "id": rpc_id,
+                        "result": {
+                            "content": [{"type": "text", "text": f"参数错误: {ve}"}],
+                            "isError": True,
+                        },
+                    }
+                )
+            except HTTPException as he:
+                return JSONResponse(
+                    content={
+                        "jsonrpc": "2.0",
+                        "id": rpc_id,
+                        "result": {
+                            "content": [{"type": "text", "text": f"请求错误: {he.detail}"}],
+                            "isError": True,
+                        },
+                    }
+                )
+            except Exception as e:
+                logger.error(f"MCP tools/call 执行失败 {tool_name}: {e}", exc_info=True)
+                return JSONResponse(
+                    content={
+                        "jsonrpc": "2.0",
+                        "id": rpc_id,
+                        "result": {
+                            "content": [{"type": "text", "text": f"服务器内部错误: {e}"}],
+                            "isError": True,
+                        },
+                    }
+                )
+            return JSONResponse(
+                content={
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "result": {
+                        "content": [{"type": "text", "text": text_out}],
+                    },
+                }
+            )
+
+        # 未知方法
+        resp = _mcp_error(-32601, f"Method not found: {method}", rpc_id)
+        return JSONResponse(status_code=404, content=resp)
+
+    except Exception as e:
+        logger.error(f"MCP 端点未预期错误: {e}", exc_info=True)
+        resp = _mcp_error(-32603, f"Internal error: {e}", rpc_id)
+        return JSONResponse(status_code=500, content=resp)
 
 
 # ============================================================
