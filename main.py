@@ -177,29 +177,35 @@ class ErrorResponse(BaseModel):
 # 鉴权依赖
 # ============================================================
 
-async def verify_api_key(x_api_key: Optional[str] = Header(None)):
+async def verify_api_key(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
     """
-    验证API密钥。
-
-    如果环境变量API_KEY未设置，则不启用鉴权（开发模式）。
-    如果设置了API_KEY，请求必须携带正确的X-API-Key头。
+    验证API密钥。支持 X-API-Key 头 和 Authorization: Bearer 头。
     """
     if not API_KEY:
-        return True  # 开发模式，不鉴权
+        return True
 
-    if x_api_key is None:
+    provided_key = x_api_key
+    if provided_key is None and authorization:
+        if authorization.startswith("Bearer "):
+            provided_key = authorization[7:].strip()
+
+    if provided_key is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="缺少API密钥。请在请求头中提供 X-API-Key。",
-            headers={"WWW-Authenticate": "ApiKey"},
+            detail="缺少API密钥。",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    if x_api_key != API_KEY:
+    if provided_key != API_KEY:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="API密钥无效。",
-            headers={"WWW-Authenticate": "ApiKey"},
+            headers={"WWW-Authenticate": "Bearer"},
         )
     return True
+
 
 
 # ============================================================
@@ -260,6 +266,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# 覆盖OpenAPI schema，添加servers字段
+_original_openapi = app.openapi
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = _original_openapi()
+    openapi_schema["servers"] = [
+        {"url": "https://astock-mcp.zeabur.app", "description": "生产环境"}
+    ]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 # ============================================================
 # 工具函数
