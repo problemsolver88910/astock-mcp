@@ -178,8 +178,8 @@ class ErrorResponse(BaseModel):
 # ============================================================
 
 async def verify_api_key(
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    authorization: Optional[str] = Header(None, alias="Authorization"),
+      x_api_key: Optional[str] = Header(None, alias="X-API-Key", include_in_schema=False),
+    authorization: Optional[str] = Header(None, alias="Authorization", include_in_schema=False),
 ):
     """
     验证API密钥。支持 X-API-Key 头 和 Authorization: Bearer 头。
