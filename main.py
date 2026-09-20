@@ -764,6 +764,69 @@ async def debug_sina(
         return {"error": str(e)}
 
 
+@app.get("/api/debug/apis", tags=["调试"])
+async def debug_apis(symbol: str = Query("sh600749")):
+    """测试多个API从美国的连通性"""
+    import data_fetcher
+    proxies = data_fetcher._get_proxies()
+    import requests
+    results = {}
+
+    # 1. 东方财富 HTTP (非HTTPS)
+    try:
+        r = requests.get(
+            "http://push2his.eastmoney.com/api/qt/stock/kline/get",
+            params={"secid": "1.600749", "klt": "1", "fqt": "1",
+                    "beg": "20260903", "end": "20260903",
+                    "fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                    "ut": "7eea3edcaed734bea9cbfc24409bb989"},
+            proxies=proxies, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        d = r.json()
+        klines = d.get("data", {}).get("klines", []) if d.get("data") else []
+        results["em_http"] = {"status": r.status_code, "bars": len(klines)}
+    except Exception as e:
+        results["em_http"] = {"error": str(e)[:100]}
+
+    # 2. 腾讯 mkline (非fqkline)
+    try:
+        r = requests.get(
+            "http://ifzq.gtimg.cn/appstock/app/kline/mkline",
+            params={"param": f"{symbol},m1,,320"},
+            proxies=proxies, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        d = r.json()
+        sd = d.get("data", {}).get(symbol, {}) if isinstance(d.get("data"), dict) else {}
+        klines = sd.get("m1", [])
+        results["tencent_mkline"] = {"status": r.status_code, "bars": len(klines),
+                                      "first": klines[0] if klines else None}
+    except Exception as e:
+        results["tencent_mkline"] = {"error": str(e)[:100]}
+
+    # 3. 雪球 minute
+    try:
+        r = requests.get(
+            "https://stock.xueqiu.com/v5/stock/chart/minute.json",
+            params={"symbol": "SH600749", "period": "1m"},
+            proxies=proxies, timeout=10,
+            headers={"User-Agent": "Mozilla/5.0",
+                     "Cookie": "xq_a_token=test"})
+        results["xueqiu"] = {"status": r.status_code, "text": r.text[:200]}
+    except Exception as e:
+        results["xueqiu"] = {"error": str(e)[:100]}
+
+    # 4. 网易分钟数据
+    try:
+        code = "0" + symbol[2:] if symbol.startswith("sh") else "1" + symbol[2:]
+        r = requests.get(
+            f"http://img1.money.126.net/data/hs/kline/minute/today/{code}.json",
+            proxies=proxies, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        results["netease"] = {"status": r.status_code, "text": r.text[:200]}
+    except Exception as e:
+        results["netease"] = {"error": str(e)[:100]}
+
+    return results
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
