@@ -3,3 +3,4 @@ uvicorn==0.40.0
 pandas==2.2.3
 requests==2.34.2
 python-multipart==0.0.12
+baostock==0.8.8

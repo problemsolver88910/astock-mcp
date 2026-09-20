@@ -859,6 +859,48 @@ async def debug_tencent_count(
         return {"error": str(e)}
 
 
+@app.get("/api/debug/baostock", tags=["调试"])
+async def debug_baostock(
+    symbol: str = Query("sh.600749"),
+    date: str = Query("2026-09-03"),
+):
+    """测试BaoStock历史分钟数据"""
+    try:
+        import baostock as bs
+        lg = bs.login()
+        if lg.error_code != '0':
+            return {"login_error": lg.error_msg}
+
+        rs = bs.query_history_k_data_plus(
+            symbol,
+            "date,time,open,high,low,close,volume,amount",
+            start_date=date,
+            end_date=date,
+            frequency="1",
+            adjustflag="2"
+        )
+
+        if rs.error_code != '0':
+            bs.logout()
+            return {"query_error": rs.error_msg}
+
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+
+        bs.logout()
+
+        return {
+            "symbol": symbol,
+            "date": date,
+            "row_count": len(rows),
+            "first_row": rows[0] if rows else None,
+            "last_row": rows[-1] if rows else None,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
