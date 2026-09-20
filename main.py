@@ -684,6 +684,50 @@ async def debug_tencent2(
         return {"error": str(e), "param": param_str}
 
 
+@app.get("/api/debug/tencent3", tags=["调试"])
+async def debug_tencent3(
+    symbol: str = Query(..., description="股票代码如 sh600893"),
+    count: int = Query(3200, description="K线数量"),
+):
+    """调试：腾讯API不带日期，拉取最新count根"""
+    import data_fetcher
+    param_str = f"{symbol},m1,,,{count},qfq"
+    proxies = data_fetcher._get_proxies()
+    try:
+        import requests
+        resp = requests.get(
+            data_fetcher.TENCENT_KLINE_URL,
+            params={"param": param_str}, proxies=proxies, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        result = resp.json()
+        data = result.get("data")
+        if isinstance(data, dict):
+            stock_data = data.get(symbol, {})
+            klines = stock_data.get("m1") or stock_data.get("qfqm1") or []
+            dates = set()
+            for k in klines:
+                if isinstance(k, list) and len(k) > 0:
+                    dates.add(k[0][:10])
+            return {
+                "param": param_str,
+                "status_code": resp.status_code,
+                "code": result.get("code"),
+                "kline_count": len(klines),
+                "dates": sorted(dates),
+                "first_kline": klines[0] if klines else None,
+                "last_kline": klines[-1] if klines else None,
+            }
+        else:
+            return {
+                "param": param_str,
+                "data_type": type(data).__name__,
+                "data_preview": str(data)[:500],
+            }
+    except Exception as e:
+        return {"error": str(e), "param": param_str}
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
