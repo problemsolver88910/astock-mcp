@@ -728,6 +728,42 @@ async def debug_tencent3(
         return {"error": str(e), "param": param_str}
 
 
+@app.get("/api/debug/sina", tags=["调试"])
+async def debug_sina(
+    symbol: str = Query("sh600749", description="股票代码"),
+    datalen: int = Query(1500, description="拉取K线数量"),
+):
+    """调试：新浪API测试不同datalen"""
+    import data_fetcher
+    proxies = data_fetcher._get_proxies()
+    url = "https://quotes.sina.cn/cn/api/jsonp_v2.php/var=/CN_MarketDataService.getKLineData"
+    params = {"symbol": symbol, "scale": 1, "ma": "no", "datalen": datalen}
+    try:
+        import requests
+        resp = requests.get(url, params=params, proxies=proxies, timeout=15,
+                          headers={"User-Agent": "Mozilla/5.0"})
+        text = resp.text
+        import re
+        m = re.search(r'\((.*)\)', text, re.DOTALL)
+        if m:
+            data = json.loads(m.group(1))
+            bars = data.get("result", {}).get("data", [])
+            dates = set()
+            for b in bars:
+                if b.get("day"):
+                    dates.add(b["day"][:10])
+            return {
+                "status_code": resp.status_code,
+                "datalen_requested": datalen,
+                "bars_returned": len(bars),
+                "date_range": f"{min(dates)} ~ {max(dates)}" if dates else None,
+                "unique_dates": sorted(dates),
+            }
+        return {"raw_text": text[:500]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
