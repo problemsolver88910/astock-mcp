@@ -70,7 +70,7 @@ def fetch_minute_data_tencent(
     返回格式: [datetime, open, close, high, low, volume]
     注意: 腾讯不直接提供amount，用 volume*close 估算。
     """
-    beg = (start_date - datetime.timedelta(days=40)).strftime('%Y-%m-%d')
+    beg = start_date.strftime('%Y-%m-%d')
     end = end_date.strftime('%Y-%m-%d')
     # 每交易日240根，最多10天=2400，取上限3200
     params = {
@@ -184,9 +184,7 @@ def fetch_minute_data_eastmoney(
         DataFrame列: date, time, open, high, low, close, volume, amount, prev_close
     """
     secid = _symbol_to_em_secid(symbol)
-    # 拉取更宽的日期范围（请求日前30天到今天），客户端再筛选，避免API日期过滤不准
-    fetch_start = start_date - datetime.timedelta(days=40)
-    beg = fetch_start.strftime('%Y%m%d')
+    beg = start_date.strftime('%Y%m%d')
     end = end_date.strftime('%Y%m%d')
 
     params = {

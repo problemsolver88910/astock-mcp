@@ -575,6 +575,83 @@ async def health_check():
     )
 
 
+@app.get("/api/debug/eastmoney", tags=["调试"])
+async def debug_eastmoney(
+    symbol: str = Query(..., description="股票代码如 sh600893"),
+    date: str = Query(..., description="日期如 2026-08-27"),
+):
+    """调试：直接返回东方财富API原始响应"""
+    import data_fetcher
+    secid = data_fetcher._symbol_to_em_secid(symbol)
+    dt = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    beg = dt.strftime('%Y%m%d')
+    end = dt.strftime('%Y%m%d')
+
+    params = {
+        "secid": secid, "klt": "1", "fqt": "1",
+        "beg": beg, "end": end,
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+        "ut": "7eea3edcaed734bea9cbfc24409bb989",
+    }
+    proxies = data_fetcher._get_proxies()
+    try:
+        import requests
+        resp = requests.get(
+            data_fetcher.EASTMONEY_KLINE_URL,
+            params=params, proxies=proxies, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        result = resp.json()
+        klines = result.get("data", {}).get("klines", [])
+        return {
+            "secid": secid,
+            "status_code": resp.status_code,
+            "has_data": bool(result.get("data")),
+            "kline_count": len(klines),
+            "first_kline": klines[0] if klines else None,
+            "last_kline": klines[-1] if klines else None,
+            "raw_keys": list(result.get("data", {}).keys()) if result.get("data") else None,
+        }
+    except Exception as e:
+        return {"error": str(e), "secid": secid}
+
+
+@app.get("/api/debug/tencent", tags=["调试"])
+async def debug_tencent(
+    symbol: str = Query(..., description="股票代码如 sh600893"),
+    date: str = Query(..., description="日期如 2026-08-27"),
+):
+    """调试：直接返回腾讯API原始响应"""
+    import data_fetcher
+    dt = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    beg = dt.strftime('%Y-%m-%d')
+    end = dt.strftime('%Y-%m-%d')
+    param_str = f"{symbol},m1,{beg},{end},3200,qfq"
+
+    proxies = data_fetcher._get_proxies()
+    try:
+        import requests
+        resp = requests.get(
+            data_fetcher.TENCENT_KLINE_URL,
+            params={"param": param_str}, proxies=proxies, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        result = resp.json()
+        stock_data = result.get("data", {}).get(symbol, {})
+        klines = stock_data.get("m1") or stock_data.get("qfqm1") or []
+        return {
+            "param": param_str,
+            "status_code": resp.status_code,
+            "code": result.get("code"),
+            "kline_count": len(klines),
+            "first_kline": klines[0] if klines else None,
+            "stock_keys": list(stock_data.keys()) if stock_data else None,
+        }
+    except Exception as e:
+        return {"error": str(e), "param": param_str}
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
