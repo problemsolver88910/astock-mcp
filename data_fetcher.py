@@ -49,8 +49,262 @@ BARS_PER_DAY = 240
 MAX_RETRIES = 3
 RETRY_INTERVAL = 2  # 秒
 
+# 东方财富历史1分钟K线API（fallback数据源）
+EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+
 # 请求超时
 REQUEST_TIMEOUT = 15
+
+# 腾讯财经历史分钟K线API（第二个fallback）
+TENCENT_KLINE_URL = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+
+
+def fetch_minute_data_tencent(
+    symbol: str,
+    start_date: datetime.date,
+    end_date: datetime.date,
+) -> Optional[pd.DataFrame]:
+    """
+    从腾讯财经API获取历史1分钟K线数据（第二个fallback）。
+
+    返回格式: [datetime, open, close, high, low, volume]
+    注意: 腾讯不直接提供amount，用 volume*close 估算。
+    """
+    beg = start_date.strftime('%Y-%m-%d')
+    end = end_date.strftime('%Y-%m-%d')
+    # 每交易日240根，最多10天=2400，取上限3200
+    params = {
+        "param": f"{symbol},m1,{beg},{end},3200,qfq",
+    }
+
+    proxies = _get_proxies()
+    try:
+        resp = requests.get(
+            TENCENT_KLINE_URL,
+            params=params,
+            proxies=proxies,
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.error(f"腾讯API请求失败: {symbol} {e}")
+        return None
+
+    if not data or data.get("code") != 0:
+        logger.warning(f"腾讯API返回错误: {symbol}")
+        return None
+
+    stock_data = data.get("data", {}).get(symbol, {})
+    klines = stock_data.get("m1") or stock_data.get("qfqm1")
+    if not klines:
+        logger.warning(f"腾讯API无分钟数据: {symbol} {start_date}~{end_date}")
+        return None
+
+    rows = []
+    for item in klines:
+        # item: [datetime, open, close, high, low, volume]
+        if len(item) < 6:
+            continue
+        dt_str = item[0]       # "2026-09-03 09:31"
+        open_price = float(item[1])
+        close_price = float(item[2])
+        high_price = float(item[3])
+        low_price = float(item[4])
+        volume = float(item[5])
+        amount = volume * close_price  # 估算成交额
+
+        date_str = dt_str[:10]
+        time_str = dt_str[11:] if len(dt_str) > 10 else ""
+        if len(time_str) == 5:
+            time_str = time_str + ":00"
+
+        rows.append({
+            "date": date_str,
+            "time": time_str,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume,
+            "amount": amount,
+        })
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(['date', 'time']).reset_index(drop=True)
+    logger.info(
+        f"[腾讯] 获取1分钟数据: {symbol} {start_date}~{end_date}, "
+        f"共 {len(df)} 根K线, 覆盖 {df['date'].nunique()} 个交易日"
+    )
+    return df
+
+
+def _symbol_to_em_secid(symbol: str) -> str:
+    """
+    将内部股票代码格式转换为东方财富secid格式。
+
+    sh600749 → 1.600749（上海市场）
+    sz000001 → 0.000001（深圳市场）
+    """
+    if symbol.startswith("sh"):
+        return f"1.{symbol[2:]}"
+    elif symbol.startswith("sz"):
+        return f"0.{symbol[2:]}"
+    return symbol
+
+
+def fetch_minute_data_eastmoney(
+    symbol: str,
+    start_date: datetime.date,
+    end_date: datetime.date,
+) -> Optional[pd.DataFrame]:
+    """
+    从东方财富API获取历史1分钟K线数据（fallback数据源）。
+
+    东方财富push2his API支持较长的历史回溯。
+    每根K线格式: "datetime,open,close,high,low,volume,amount,amplitude"
+    注意: 东方财富返回顺序是 open, close, high, low（与新浪不同）。
+
+    Args:
+        symbol: 股票代码（如 sh600749）
+        start_date: 起始日期
+        end_date: 结束日期
+
+    Returns:
+        DataFrame列: date, time, open, high, low, close, volume, amount, prev_close
+    """
+    secid = _symbol_to_em_secid(symbol)
+    beg = start_date.strftime('%Y%m%d')
+    end = end_date.strftime('%Y%m%d')
+
+    params = {
+        "secid": secid,
+        "klt": "1",          # 1分钟K线
+        "fqt": "1",           # 前复权
+        "beg": beg,
+        "end": end,
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+        "ut": "7eea3edcaed734bea9cbfc24409bb989",
+    }
+
+    proxies = _get_proxies()
+    try:
+        resp = requests.get(
+            EASTMONEY_KLINE_URL,
+            params=params,
+            proxies=proxies,
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.error(f"东方财富API请求失败: {symbol} {e}")
+        return None
+
+    if not data or not data.get("data") or not data["data"].get("klines"):
+        logger.warning(f"东方财富API返回空数据: {symbol} {start_date}~{end_date}")
+        return None
+
+    klines = data["data"]["klines"]
+    if not klines:
+        return None
+
+    rows = []
+    for line in klines:
+        parts = line.split(",")
+        if len(parts) < 7:
+            continue
+        # parts: [datetime, open, close, high, low, volume, amount, amplitude]
+        dt_str = parts[0]       # "2026-09-03 09:31"
+        open_price = float(parts[1])
+        close_price = float(parts[2])
+        high_price = float(parts[3])
+        low_price = float(parts[4])
+        volume = float(parts[5])
+        amount = float(parts[6])
+
+        date_str = dt_str[:10]
+        time_str = dt_str[11:] if len(dt_str) > 10 else ""
+        # 统一时间格式为 HH:MM:SS
+        if len(time_str) == 5:
+            time_str = time_str + ":00"
+
+        rows.append({
+            "date": date_str,
+            "time": time_str,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume,
+            "amount": amount,
+        })
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(['date', 'time']).reset_index(drop=True)
+    logger.info(
+        f"东方财富获取1分钟数据: {symbol} {start_date}~{end_date}, "
+        f"共 {len(df)} 根K线, 覆盖 {df['date'].nunique()} 个交易日"
+    )
+    return df
+
+
+def _get_prev_close_eastmoney(symbol: str, date_str: str) -> Optional[float]:
+    """
+    从东方财富获取指定日期前一交易日的收盘价。
+
+    通过获取指定日期前一个交易日的日K线收盘价。
+    """
+    try:
+        current_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return None
+
+    prev_date = get_previous_trading_day(current_date)
+    secid = _symbol_to_em_secid(symbol)
+
+    # 获取prev_date的日K线（klt=101）
+    params = {
+        "secid": secid,
+        "klt": "101",        # 日K线
+        "fqt": "1",
+        "beg": prev_date.strftime('%Y%m%d'),
+        "end": prev_date.strftime('%Y%m%d'),
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+        "ut": "7eea3edcaed734bea9cbfc24409bb989",
+    }
+
+    proxies = _get_proxies()
+    try:
+        resp = requests.get(
+            EASTMONEY_KLINE_URL,
+            params=params,
+            proxies=proxies,
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data and data.get("data") and data["data"].get("klines"):
+            line = data["data"]["klines"][0]
+            parts = line.split(",")
+            if len(parts) >= 3:
+                # parts: [date, open, close, ...]
+                return float(parts[2])
+    except Exception as e:
+        logger.error(f"东方财富获取prev_close失败: {symbol} {date_str}: {e}")
+
+    return None
 
 
 def _get_proxies() -> Optional[Dict[str, str]]:
@@ -361,57 +615,83 @@ def fetch_minute_data(
         logger.warning(f"日期范围内没有交易日: {start_date} ~ {end_date}")
         return None
 
-    # 检查是否超出新浪历史深度（约6个交易日）
-    # 注意：如果end_date是最近的交易日，6天内可以获取
-    # 如果end_date较早，可能无法获取
-    today = datetime.date.today()
-    days_from_today = len(get_trading_days(end_date, today))
-
-    if days_from_today > 7:
-        logger.error(
-            f"请求日期超出新浪历史深度: end_date={end_date}, "
-            f"距今天 {days_from_today} 个交易日（最大约6-7个）"
-        )
-        return None
-
     if len(trading_days) > 10:
         logger.error(f"请求交易日数量过多: {len(trading_days)} 天（最大10天）")
         return None
 
-    # 计算datalen
-    datalen = _calculate_datalen_for_range(start_date, end_date)
+    # 判断是否需要使用东方财富fallback
+    today = datetime.date.today()
+    days_from_today = len(get_trading_days(end_date, today))
 
-    # 获取原始数据
-    raw_df = fetch_minute_data_raw(symbol, datalen)
-    if raw_df is None or raw_df.empty:
-        return None
+    use_sina = days_from_today <= 7
 
-    # 解析日期和时间
-    raw_df['date'] = raw_df['day'].apply(_extract_date_from_day)
-    raw_df['time'] = raw_df['day'].apply(_extract_time_from_day)
+    if use_sina:
+        # === 主数据源：新浪财经 ===
+        datalen = _calculate_datalen_for_range(start_date, end_date)
+        raw_df = fetch_minute_data_raw(symbol, datalen)
 
-    # 筛选日期范围内的数据
+        if raw_df is not None and not raw_df.empty:
+            raw_df['date'] = raw_df['day'].apply(_extract_date_from_day)
+            raw_df['time'] = raw_df['day'].apply(_extract_time_from_day)
+
+            start_str = start_date.strftime('%Y-%m-%d')
+            end_str = end_date.strftime('%Y-%m-%d')
+            mask = (raw_df['date'] >= start_str) & (raw_df['date'] <= end_str)
+            df = raw_df[mask].copy()
+
+            if not df.empty:
+                df = df.sort_values(['date', 'time']).reset_index(drop=True)
+                df = _add_prev_close(symbol, df, raw_df)
+                output_cols = ['date', 'time', 'open', 'high', 'low', 'close', 'volume', 'amount', 'prev_close']
+                df = df[output_cols]
+                logger.info(
+                    f"[新浪] 获取1分钟数据: {symbol} {start_str}~{end_str}, "
+                    f"共 {len(df)} 根K线"
+                )
+                return df
+
+        logger.info(f"新浪未获取到数据，切换东方财富fallback: {symbol} {start_date}~{end_date}")
+
+    # === Fallback数据源：东方财富 → 腾讯 ===
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
-    mask = (raw_df['date'] >= start_str) & (raw_df['date'] <= end_str)
-    df = raw_df[mask].copy()
 
-    if df.empty:
-        logger.warning(f"筛选后数据为空: {symbol} {start_str} ~ {end_str}")
+    df = fetch_minute_data_eastmoney(symbol, start_date, end_date)
+
+    if df is None or df.empty:
+        logger.info(f"东方财富失败，切换腾讯: {symbol} {start_date}~{end_date}")
+        df = fetch_minute_data_tencent(symbol, start_date, end_date)
+
+    if df is None or df.empty:
+        logger.error(f"新浪、东方财富、腾讯均未获取到数据: {symbol} {start_str}~{end_str}")
         return None
 
-    # 按日期和时间排序
-    df = df.sort_values(['date', 'time']).reset_index(drop=True)
+    # 为fallback数据添加prev_close（优先东方财富日线，新浪日线兜底）
+    df['prev_close'] = None
+    for date_str in sorted(df['date'].unique()):
+        prev_close = _get_prev_close_eastmoney(symbol, date_str)
+        if prev_close is None:
+            # 新浪日线兜底
+            try:
+                daily_df = fetch_daily_data(symbol, datalen=20)
+                if daily_df is not None and not daily_df.empty:
+                    current_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+                    prev_date = get_previous_trading_day(current_date)
+                    prev_date_str = prev_date.strftime('%Y-%m-%d')
+                    prev_row = daily_df[daily_df['date'] == prev_date_str]
+                    if not prev_row.empty:
+                        prev_close = float(prev_row.iloc[0]['close'])
+            except Exception as e:
+                logger.warning(f"获取prev_close失败: {symbol} {date_str}: {e}")
 
-    # 添加prev_close
-    df = _add_prev_close(symbol, df, raw_df)
+        if prev_close is not None:
+            df.loc[df['date'] == date_str, 'prev_close'] = prev_close
 
-    # 选择输出列
     output_cols = ['date', 'time', 'open', 'high', 'low', 'close', 'volume', 'amount', 'prev_close']
     df = df[output_cols]
 
     logger.info(
-        f"获取1分钟数据完成: {symbol} {start_str}~{end_str}, "
+        f"[Fallback] 获取1分钟数据完成: {symbol} {start_str}~{end_str}, "
         f"共 {len(df)} 根K线, 覆盖 {df['date'].nunique()} 个交易日"
     )
     return df
