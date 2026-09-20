@@ -827,6 +827,38 @@ async def debug_apis(symbol: str = Query("sh600749")):
     return results
 
 
+@app.get("/api/debug/tencent_count", tags=["调试"])
+async def debug_tencent_count(
+    symbol: str = Query("sh600749"),
+    count: int = Query(320),
+):
+    """测试腾讯mkline不同count"""
+    import data_fetcher
+    proxies = data_fetcher._get_proxies()
+    import requests
+    try:
+        r = requests.get(
+            "http://ifzq.gtimg.cn/appstock/app/kline/mkline",
+            params={"param": f"{symbol},m1,,{count}"},
+            proxies=proxies, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        d = r.json()
+        sd = d.get("data", {}).get(symbol, {}) if isinstance(d.get("data"), dict) else {}
+        klines = sd.get("m1", [])
+        dates = set()
+        for k in klines:
+            if isinstance(k, list) and len(k) > 0:
+                dates.add(k[0][:8])  # YYYYMMDD
+        return {
+            "requested_count": count,
+            "returned_bars": len(klines),
+            "dates": sorted(dates),
+            "first": klines[0] if klines else None,
+            "last": klines[-1] if klines else None,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
