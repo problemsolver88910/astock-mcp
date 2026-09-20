@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 SINA_KLINE_URL = "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData"
 
 # 新浪API最大datalen
-MAX_DATALEN = 1500
+MAX_DATALEN = 10000
 
 # A股每天1分钟K线数量
 BARS_PER_DAY = 240

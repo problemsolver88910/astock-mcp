@@ -747,10 +747,10 @@ async def debug_sina(
         m = re.search(r'\((.*)\)', text, re.DOTALL)
         if m:
             data = json.loads(m.group(1))
-            bars = data.get("result", {}).get("data", [])
+            bars = data if isinstance(data, list) else data.get("result", {}).get("data", [])
             dates = set()
             for b in bars:
-                if b.get("day"):
+                if isinstance(b, dict) and b.get("day"):
                     dates.add(b["day"][:10])
             return {
                 "status_code": resp.status_code,
