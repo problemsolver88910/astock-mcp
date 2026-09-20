@@ -901,6 +901,49 @@ async def debug_baostock(
         return {"error": str(e)}
 
 
+@app.get("/api/debug/sina_history", tags=["调试"])
+async def debug_sina_history(
+    symbol: str = Query("sh600749"),
+    date: str = Query("2026-09-03"),
+):
+    """测试新浪历史分钟数据端点"""
+    import data_fetcher
+    proxies = data_fetcher._get_proxies()
+    import requests
+
+    results = {}
+
+    # 1. 新浪历史K线JS端点
+    try:
+        url = f"https://finance.sina.com.cn/realstock/company/{symbol}/hisdata/klc_kl.js"
+        r = requests.get(url, params={"d": date}, proxies=proxies, timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"})
+        results["sina_klc"] = {"status": r.status_code, "len": len(r.text), "preview": r.text[:300]}
+    except Exception as e:
+        results["sina_klc"] = {"error": str(e)[:100]}
+
+    # 2. 新浪分钟数据旧端点
+    try:
+        code = symbol[2:]
+        prefix = "sh" if symbol.startswith("sh") else "sz"
+        url = f"https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_min=/CN_MarketDataService.getKLineData"
+        r = requests.get(url, params={"symbol": symbol, "scale": 1, "ma": "no", "datalen": 1500},
+                        proxies=proxies, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        results["sina_quote"] = {"status": r.status_code, "len": len(r.text)}
+    except Exception as e:
+        results["sina_quote"] = {"error": str(e)[:100]}
+
+    # 3. 腾讯日分钟数据端点
+    try:
+        url = f"http://data.gtimg.cn/flashdata/hushen/minute/{symbol}.js"
+        r = requests.get(url, proxies=proxies, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        results["tencent_minute_js"] = {"status": r.status_code, "len": len(r.text), "preview": r.text[:300]}
+    except Exception as e:
+        results["tencent_minute_js"] = {"error": str(e)[:100]}
+
+    return results
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
