@@ -1209,9 +1209,10 @@ async def mcp_endpoint(
     authorization: Optional[str] = Header(None, alias="Authorization", include_in_schema=False),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key", include_in_schema=False),
 ):
+    # MCP端点不鉴权（只读行情数据，ChatGPT连接器无header认证能力）
     # 鉴权
-    if not _mcp_check_auth(authorization, x_api_key):
-        return _mcp_unauthorized()
+    # if not _mcp_check_auth(authorization, x_api_key):
+    #     return _mcp_unauthorized()
 
     # 解析请求体
     try:
