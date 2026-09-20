@@ -652,6 +652,38 @@ async def debug_tencent(
         return {"error": str(e), "param": param_str}
 
 
+@app.get("/api/debug/tencent2", tags=["调试"])
+async def debug_tencent2(
+    symbol: str = Query(..., description="股票代码如 sh600893"),
+    date: str = Query(..., description="日期如 2026-08-27"),
+):
+    """调试：腾讯API原始响应"""
+    import data_fetcher
+    dt = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    beg = dt.strftime('%Y-%m-%d')
+    end = dt.strftime('%Y-%m-%d')
+    param_str = f"{symbol},m1,{beg},{end},3200,qfq"
+
+    proxies = data_fetcher._get_proxies()
+    try:
+        import requests
+        resp = requests.get(
+            data_fetcher.TENCENT_KLINE_URL,
+            params={"param": param_str}, proxies=proxies, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        result = resp.json()
+        return {
+            "param": param_str,
+            "status_code": resp.status_code,
+            "top_keys": list(result.keys()) if isinstance(result, dict) else type(result).__name__,
+            "data_type": type(result.get("data")).__name__ if isinstance(result, dict) else None,
+            "data_preview": str(result.get("data"))[:800] if result.get("data") else None,
+        }
+    except Exception as e:
+        return {"error": str(e), "param": param_str}
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
