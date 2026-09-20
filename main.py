@@ -944,6 +944,53 @@ async def debug_sina_history(
     return results
 
 
+@app.get("/api/debug/em_headers", tags=["调试"])
+async def debug_em_headers(symbol: str = Query("1.600749")):
+    """测试东方财富不同请求头/域名"""
+    import data_fetcher
+    proxies = data_fetcher._get_proxies()
+    import requests
+    results = {}
+
+    headers_variants = [
+        {"name": "browser_ua", "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}},
+        {"name": "mobile_ua", "headers": {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"}},
+        {"name": "with_referer", "headers": {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}},
+        {"name": "chinese_ua", "headers": {"User-Agent": "Mozilla/5.0", "Accept": "application/json", "Referer": "https://quote.eastmoney.com/sh600749.html"}},
+    ]
+
+    for hv in headers_variants:
+        try:
+            r = requests.get(
+                "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                params={"secid": symbol, "klt": "1", "fqt": "1",
+                        "beg": "20260903", "end": "20260903",
+                        "fields1": "f1,f2,f3,f4,f5,f6",
+                        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                        "ut": "7eea3edcaed734bea9cbfc24409bb989"},
+                proxies=proxies, timeout=10, headers=hv["headers"])
+            klines = r.json().get("data", {}).get("klines", []) if r.json().get("data") else []
+            results[hv["name"]] = {"status": r.status_code, "bars": len(klines)}
+        except Exception as e:
+            results[hv["name"]] = {"error": str(e)[:80]}
+
+    # 也试试 push2 非 his 域名
+    try:
+        r = requests.get(
+            "https://push2.eastmoney.com/api/qt/stock/kline/get",
+            params={"secid": symbol, "klt": "1", "fqt": "1",
+                    "beg": "20260903", "end": "20260903",
+                    "fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                    "ut": "7eea3edcaed734bea9cbfc24409bb989"},
+            proxies=proxies, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        results["push2_domain"] = {"status": r.status_code, "text": r.text[:200]}
+    except Exception as e:
+        results["push2_domain"] = {"error": str(e)[:80]}
+
+    return results
+
+
 @app.get(
     "/api/stock/search",
     response_model=StockSearchResponse,
