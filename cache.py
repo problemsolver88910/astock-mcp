@@ -49,6 +49,16 @@ def _resolve_db_dir() -> str:
 DB_DIR = _resolve_db_dir()
 DB_PATH = os.path.join(DB_DIR, "cache.db")
 
+# 若随代码包附带了预置缓存（只读目录），首次启动时复制到可写目录继续使用
+_bundled_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "cache.db")
+if os.path.exists(_bundled_db) and not os.path.exists(DB_PATH):
+    try:
+        import shutil
+        shutil.copy2(_bundled_db, DB_PATH)
+        logger.info(f"已载入随包预置缓存: {DB_PATH}")
+    except Exception as e:
+        logger.warning(f"预置缓存复制失败: {e}")
+
 # A股全天1分钟K线数量（9:30-11:30共120根，13:00-15:00共120根）
 FULL_DAY_BARS = 240
 
