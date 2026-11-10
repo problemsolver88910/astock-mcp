@@ -226,9 +226,12 @@ async def lifespan(app: FastAPI):
     logger.info(f"API密钥鉴权: {'已启用' if API_KEY else '未启用（开发模式）'}")
     logger.info(f"单次请求限制: 最多{MAX_STOCKS_PER_REQUEST}只股票, 最多{MAX_TRADING_DAYS_PER_REQUEST}个交易日")
 
-    # 初始化数据库
-    init_db()
-    logger.info("数据库初始化完成")
+    # 初始化数据库（容器环境不可写时不影响主服务启动，自动降级为无缓存运行）
+    try:
+        init_db()
+        logger.info("数据库初始化完成")
+    except Exception as e:
+        logger.warning(f"数据库初始化失败，将降级为无缓存模式运行: {e}")
 
     logger.info("服务启动完成")
     logger.info("=" * 60)
@@ -1783,7 +1786,7 @@ async def general_exception_handler(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 8080))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",

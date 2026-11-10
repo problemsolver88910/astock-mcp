@@ -24,7 +24,29 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # 数据库文件路径
-DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+# 优先使用 CACHE_DIR 环境变量；代码目录不可写时（如 Serverless 代码包只读挂载）自动降级到 /tmp
+def _resolve_db_dir() -> str:
+    candidates = []
+    env_dir = os.environ.get("CACHE_DIR")
+    if env_dir:
+        candidates.append(env_dir)
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+    candidates.append("/tmp/astock_cache")
+
+    for path in candidates:
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, ".write_test")
+            with open(probe, "w") as f:
+                f.write("1")
+            os.remove(probe)
+            return path
+        except Exception:
+            continue
+    return "/tmp/astock_cache"
+
+
+DB_DIR = _resolve_db_dir()
 DB_PATH = os.path.join(DB_DIR, "cache.db")
 
 # A股全天1分钟K线数量（9:30-11:30共120根，13:00-15:00共120根）

@@ -96,8 +96,11 @@ def fetch_minute_data_tencent(
         logger.warning(f"腾讯API返回错误: {symbol}")
         return None
 
-    stock_data = data.get("data", {}).get(symbol, {})
+    payload = data.get("data")
+    # 腾讯在无数据时会把 data 返回成 list（空数组），需要兼容
+    stock_data = payload.get(symbol, {}) if isinstance(payload, dict) else {}
     klines = stock_data.get("m1") or stock_data.get("qfqm1")
+
     if not klines:
         logger.warning(f"腾讯API无分钟数据: {symbol} {start_date}~{end_date}")
         return None
